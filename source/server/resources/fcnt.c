@@ -115,7 +115,7 @@ int create_fcnt(oneM2MPrimitive *o2pt, RTNode *parent_rtnode)
 			{
 				if (customAttrs) cJSON_Delete(customAttrs);
 				cJSON_Delete(root);
-				return handle_error(o2pt, RSC_NOT_IMPLEMENTED, "not supported attribute for this release version");
+				return handle_error(o2pt, RSC_BAD_REQUEST, "not supported attribute for this release version");
 			}
 		}
 	}
@@ -346,7 +346,7 @@ int update_fcnt(oneM2MPrimitive *o2pt, RTNode *target_rtnode)
 		{
 			if (cJSON_GetObjectItem(m2m_fcnt, rvi4_attrs[i]))
 			{
-				return handle_error(o2pt, RSC_NOT_IMPLEMENTED, "not supported attribute for this release version");
+				return handle_error(o2pt, RSC_BAD_REQUEST, "not supported attribute for this release version");
 			}
 		}
 	}
