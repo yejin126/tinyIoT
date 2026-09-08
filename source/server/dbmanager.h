@@ -38,6 +38,9 @@ int db_tsi_get_max_snr(const char *ts_ri);
 int db_tsi_get_min_snr(const char *ts_ri);
 int db_tsi_check_snr_dup(const char *ts_ri, int snr);
 int db_tsi_check_dgt_dup(const char *ts_ri, const char *dgt);
+// Latest dataGenerationTime stored under a TS, or NULL when it holds no instances.
+// Caller must free() the returned string.
+char *db_tsi_get_last_dgt(const char *ts_ri);
 
 // TS missing-data tracking fields
 int db_ts_get_mdc(const char *ts_ri);

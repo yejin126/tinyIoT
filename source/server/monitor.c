@@ -618,14 +618,8 @@ static void traverse_and_check_ts_missing(RTNode *node, long long now_us) {
                     char new_lt_str[64];
                     us_to_iso8601_monitor(lt_us + pei_us, new_lt_str);
 
-                    int after_mdc = cur_mdc + missed_count;
-
-                    // Update in-memory TS object
-                    if (mdcObj && cJSON_IsNumber(mdcObj)) {
-                        cJSON_SetNumberValue(mdcObj, after_mdc);
-                    } else {
-                        cJSON_ReplaceItemInObject(node->obj, "mdc", cJSON_CreateNumber(after_mdc));
-                    }
+                    (void)cur_mdc;
+                    (void)missed_count;
 
                     // Update lt
                     if (ltObj && cJSON_IsString(ltObj)) {
@@ -641,6 +635,23 @@ static void traverse_and_check_ts_missing(RTNode *node, long long now_us) {
                         mdlt = cJSON_GetObjectItem(node->obj, "mdlt");
                     }
                     cJSON_AddItemToArray(mdlt, cJSON_CreateString(new_lt_str));
+
+                    // mdlt keeps at most mdn entries, oldest first out, and mdc
+                    // reports its current size - same rule as the TSI-gap path.
+                    cJSON *mdn_obj = cJSON_GetObjectItem(node->obj, "mdn");
+                    int mdn = (mdn_obj && cJSON_IsNumber(mdn_obj)) ? (int)cJSON_GetNumberValue(mdn_obj) : 0;
+                    if (mdn > 0) {
+                        while (cJSON_GetArraySize(mdlt) > mdn) {
+                            cJSON_DeleteItemFromArray(mdlt, 0);
+                        }
+                    }
+
+                    int after_mdc = cJSON_GetArraySize(mdlt);
+                    if (mdcObj && cJSON_IsNumber(mdcObj)) {
+                        cJSON_SetNumberValue(mdcObj, after_mdc);
+                    } else {
+                        cJSON_ReplaceItemInObject(node->obj, "mdc", cJSON_CreateNumber(after_mdc));
+                    }
 
                     // Persist via DB manager (backend-agnostic)
                     db_update_resource(node->obj, (char *)ri, RT_TS);

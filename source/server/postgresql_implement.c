@@ -3137,6 +3137,39 @@ int db_tsi_check_snr_dup(const char *ts_ri, int snr)
     return exists;
 }
 
+// dgt uses the fixed-width oneM2M timestamp format, so lexical ordering is
+// chronological ordering.
+char *db_tsi_get_last_dgt(const char *ts_ri)
+{
+    if (!ts_ri) return NULL;
+    char *dgt = NULL;
+
+    pg_lock();
+    PGconn *conn = get_pg_conn();
+    if (!conn) {
+        pg_unlock();
+        return NULL;
+    }
+
+    char *escaped_ts_ri = pg_escape_string_value(ts_ri);
+    char sql[512];
+    snprintf(sql, sizeof(sql),
+             "SELECT tsi.dgt FROM tsi JOIN general ON tsi.id = general.id "
+             "WHERE general.pi = '%s' AND tsi.dgt IS NOT NULL "
+             "ORDER BY tsi.dgt DESC LIMIT 1;",
+             escaped_ts_ri);
+    free(escaped_ts_ri);
+
+    PGresult *r = PQexec(conn, sql);
+    if (r && PQresultStatus(r) == PGRES_TUPLES_OK && PQntuples(r) > 0) {
+        char *v = PQgetvalue(r, 0, 0);
+        if (v && strlen(v) > 0) dgt = strdup(v);
+    }
+    if (r) PQclear(r);
+    pg_unlock();
+    return dgt;
+}
+
 int db_ts_get_mdc(const char *ts_ri)
 {
     if (!ts_ri) return 0;
