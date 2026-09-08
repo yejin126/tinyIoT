@@ -5172,8 +5172,11 @@ void announce_to_annc(oneM2MPrimitive *o2pt, RTNode *target_rtnode, cJSON *prev_
 	cJSON_ArrayForEach(it, upd_body)
 	{
 		if (!it->string) continue;
-		if (annc_attr_is_ma(ty, it->string) && (v = cJSON_GetObjectItem(src, it->string)))
+		if (!annc_attr_is_ma(ty, it->string)) continue;
+		if ((v = cJSON_GetObjectItem(src, it->string)))
 			cJSON_AddItemToObject(resource, it->string, cJSON_Duplicate(v, true));
+		else if (cJSON_IsNull(it))
+			cJSON_AddItemToObject(resource, it->string, cJSON_CreateNull());
 	}
 
 	// (2) currently Optionally-Announced attributes (in aa) -> current value, or
