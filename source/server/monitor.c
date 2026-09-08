@@ -17,6 +17,9 @@
 
 extern pthread_mutex_t main_lock;
 extern int terminate;
+#ifdef UPPERTESTER
+extern pthread_rwlock_t g_reset_lock;   // held write by reset_cse() during teardown/rebuild
+#endif
 
 // Throttle missing-data generation per TS to avoid generating multiple missing periods
 // in a short time window (e.g., when lt is far behind). This aligns behavior with
@@ -672,12 +675,25 @@ void *monitor_serve(void *arg) {
         long long now_us = wallclock_now_us();
         char *now_str = get_local_time(0);
 
+#ifdef UPPERTESTER
+        // Block while reset_cse() is tearing down / rebuilding `rt`; otherwise
+        // this traversal walks freed nodes (crash "sometimes" during UT Reset).
+        pthread_rwlock_rdlock(&g_reset_lock);
+/* ========== DEBUG TRACE — delete this line later ========== */
+        logger("MONITOR", LOG_LEVEL_DEBUG, "[DBG] monitor tick: got reset rdlock");
+/* ======================================================== */
+#endif
+
         // Start traversal from the CSE base node (CSE_BASE_RI) if available.
         // This avoids any dependency on a ResourceTree wrapper header.
         RTNode *root = find_rtnode(CSE_BASE_RI);
         if (root) {
             traverse_and_check_ts_missing(root, now_us);
         }
+
+#ifdef UPPERTESTER
+        pthread_rwlock_unlock(&g_reset_lock);
+#endif
 
         free(now_str);
         usleep(500000);

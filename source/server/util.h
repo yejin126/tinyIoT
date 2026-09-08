@@ -11,16 +11,10 @@
 
 bool init_server();
 
-// Build the CSE from scratch: (re)create the resource tree, seed the CSEBase and
-// default ACP on first boot, and register with the registrar CSE for MN/ASN-CSE.
-// Returns false on a fatal init failure. Used by main() at startup.
-bool bootstrap_cse();
+bool bootstrap_cse(void);
+bool bootstrap_cse_ex(bool require_registration);
 
 #ifdef UPPERTESTER
-// Tear the CSE down to factory state and rebuild it via bootstrap_cse():
-// wipes every stored resource and the in-memory tree, then re-seeds CSEBase +
-// default ACP. Implements the TS-0019 Upper Tester "Reset" command.
-// Returns 0 on success, -1 on failure. Takes main_lock internally.
 int reset_cse();
 #endif
 
@@ -59,22 +53,13 @@ void detach_subs(RTNode* parent, RTNode* sub);
 // Announcement
 int handle_annc_create(RTNode* parent_rtnode, cJSON* resource_obj, cJSON* at_obj, cJSON* final_at);
 int handle_annc_update(RTNode* target_rtnode, cJSON* at_obj, cJSON* final_at);
-
-// Fill `dst` (the <...>Annc object under construction) with the attributes to
-// announce for `src` (the original resource of type `ty`): all Mandatory-Announced
-// attributes plus every Optionally-Announced attribute listed in `src`.aa.
-// Returns 0 on success, -1 if `src`.aa lists an attribute not announceable for `ty`.
+void process_annc_at_update(RTNode* target_rtnode, cJSON* body);
 int build_annc_attrs(cJSON* dst, cJSON* src, ResourceType ty);
-
-// Propagate a resource UPDATE to its announced copies: Mandatory-Announced attributes
-// changed by this update, current Optionally-Announced attributes, and OA attributes
-// dropped from `aa` (sent as null). `prev_aa` (the `aa` value before the update) and
-// `upd_body` (the update request content) are snapshots taken before the resource
-// handler ran; either may be NULL.
+void validate_aa(oneM2MPrimitive* o2pt, cJSON* resource, ResourceType ty);
 void announce_to_annc(oneM2MPrimitive* o2pt, RTNode* target_rtnode, cJSON* prev_aa, cJSON* upd_body);
 int create_remote_cba(char* poa, char** cbA_url);
 int deregister_remote_cba(char* cbA_url);
-int deregister_remote_annc(RTNode* target_rtnode, cJSON* delete_at_list);
+int deregister_remote_annc(RTNode* target_rtnode, cJSON* delete_at_list, cJSON* keep_out);
 void removeChildAnnc(RTNode* rtnode, char* at);
 
 // Resource Tree
@@ -124,10 +109,19 @@ void get_child_references(oneM2MPrimitive* o2pt, RTNode* rtnode, cJSON* result_o
 
 typedef struct {
 	ResourceType ty;
-	const char *const *ma_fields;
-} MandatoryAttrDef;
+	const char *const *m;
+	const char *const *o;
+} CreateAttrDef;
 
-extern const MandatoryAttrDef MA_TABLE[];
+extern const CreateAttrDef M_TABLE[];   // terminated by { RT_MIXED, NULL, NULL }
+
+typedef struct {
+	ResourceType ty;
+	const char *const *ma;
+	const char *const *oa;
+} AnncAttrDef;
+
+extern const AnncAttrDef ANNC_ATTR_TABLE[];   // terminated by { RT_MIXED, NULL, NULL }
 
 // validation
 bool is_attr_valid(cJSON* obj, ResourceType ty, char* err_msg);

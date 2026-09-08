@@ -38,29 +38,89 @@ pthread_mutexattr_t Attr;
 
 #endif
 
+#ifdef UPPERTESTER
+// request threads take this rdlock for the whole of route(); reset_cse() takes
+// the wrlock so it can tear down / rebuild `rt` with no request touching it.
+pthread_rwlock_t g_reset_lock;
+#endif
+
 void route(oneM2MPrimitive *o2pt);
 void stop_server(int sig);
 void log_runtime(double start);
 cJSON *ATTRIBUTES;
 
+static const char *AE_M[]  = { "api", "rr", NULL };
+static const char *AE_O[]  = { "rn", "lbl", "acpi", "et", "daci", "at", "aa", "ast",
+                               "poa", "apn", "or", "nl", "csz", "esi", "mei", "srv", NULL };
+static const char *ACP_M[] = { "pv", "pvs", NULL };
+static const char *ACP_O[] = { "rn", "lbl", "et", "at", "aa", "ast", NULL };
+static const char *SUB_M[] = { "nu", NULL };
+static const char *SUB_O[] = { "rn", "lbl", "acpi", "et", "cr", "exc", "gpi", "nfu",
+                               "bn", "rl", "psn", "pn", "nsp", "nct", "nec", "su", NULL };
+static const char *GRP_M[] = { "mid", NULL };
+static const char *GRP_O[] = { "rn", "lbl", "acpi", "et", "daci", "at", "aa", "ast",
+                               "mnm", "spty", "macp", "csy", "gn", NULL };
+static const char *CSR_M[] = { "cb", "rr", "srv", NULL };
+static const char *CSR_O[] = { "rn", "lbl", "acpi", "et", "at", "aa", "ast", "cst",
+                               "poa", "csi", "mei", "nl", "csz", "dcse", NULL };
+static const char *CNT_O[] = { "rn", "lbl", "acpi", "et", "daci", "at", "aa", "ast",
+                               "cr", "mni", "mbs", "mia", "or", "disr", "li", NULL };
+static const char *CIN_M[] = { "con", NULL };
+static const char *CIN_O[] = { "rn", "lbl", "et", "at", "aa", "cr", "cnf", "or", NULL };
+static const char *TS_O[]  = { "rn", "lbl", "acpi", "et", "daci", "at", "aa", "ast",
+                               "cr", "mni", "mbs", "mia", "pei", "peid", "mdd", "mdn",
+                               "mdt", "or", "cnf", NULL };
+static const char *TSI_M[] = { "dgt", "con", NULL };
+static const char *TSI_O[] = { "rn", "lbl", "et", "snr", NULL };
+static const char *FCNT_M[]= { "cnd", NULL };
+static const char *FCNT_O[]= { "rn", "lbl", "acpi", "et", "daci", "at", "aa", "ast",
+                               "cr", "or", "nl", "mni", "mia", "mbs", NULL };
 
-static const char *AE_MA[]  = { "api", "rr", NULL };
-static const char *ACP_MA[] = { "pv", "pvs", NULL };
-static const char *SUB_MA[] = { "nu", NULL };
-static const char *GRP_MA[] = { "mid", NULL };
-static const char *CSR_MA[] = { "cb", "srv", "rr", NULL };
-static const char *CIN_MA[] = { "con", NULL };
-static const char *TSI_MA[] = { "con", "dgt", NULL };
+const CreateAttrDef M_TABLE[] = {
+	{ RT_AE,   AE_M,   AE_O   },
+	{ RT_ACP,  ACP_M,  ACP_O  },
+	{ RT_SUB,  SUB_M,  SUB_O  },
+	{ RT_GRP,  GRP_M,  GRP_O  },
+	{ RT_CSR,  CSR_M,  CSR_O  },
+	{ RT_CNT,  NULL,   CNT_O  },
+	{ RT_CIN,  CIN_M,  CIN_O  },
+	{ RT_TS,   NULL,   TS_O   },
+	{ RT_TSI,  TSI_M,  TSI_O  },
+	{ RT_FCNT, FCNT_M, FCNT_O },
+	{ RT_MIXED, NULL,  NULL   },
+};
 
-const MandatoryAttrDef MA_TABLE[] = {
-	{ RT_AE,  AE_MA },
-	{ RT_ACP, ACP_MA },
-	{ RT_SUB, SUB_MA },
-	{ RT_GRP, GRP_MA },
-	{ RT_CSR, CSR_MA },
-	{ RT_CIN, CIN_MA },
-	{ RT_TSI, TSI_MA },
-	{ RT_MIXED, NULL },
+static const char *AE_ANNC_MA[]  = { "et", "acpi", "lbl", "ast", "srv", NULL };
+static const char *AE_ANNC_OA[]  = { "daci", "loc", "apn", "api", "aei", "poa", "or",
+                                     "nl", "rr", "csz", "regs", "trps", "scp", NULL };
+static const char *CNT_ANNC_MA[] = { "et", "acpi", "lbl", "ast", NULL };
+static const char *CNT_ANNC_OA[] = { "daci", "loc", "mni", "mbs", "mia", "li", "or", "disr", NULL };
+static const char *CIN_ANNC_MA[] = { "lbl", "ast", NULL };
+static const char *CIN_ANNC_OA[] = { "loc", "cnf", "conr", "or", "con", NULL };
+static const char *GRP_ANNC_MA[] = { "et", "acpi", "lbl", "ast", NULL };
+static const char *GRP_ANNC_OA[] = { "daci", "spty", "cnm", "mnm", "mid", "macp", "mtv",
+                                     "csy", "gn", "ssi", "nar", "scen", "scal", "mt", NULL };
+static const char *ACP_ANNC_MA[] = { "et", "lbl", "ast", "pv", "pvs", "adri", "apri", "airi", NULL };
+static const char *ACP_ANNC_OA[] = { NULL };
+static const char *TS_ANNC_MA[]  = { "et", "acpi", "lbl", "ast", NULL };
+static const char *TS_ANNC_OA[]  = { "daci", "loc", "mni", "mbs", "mia", "pei", "peid",
+                                     "mdn", "mdt", "or", "cnf", NULL };
+static const char *FCNT_ANNC_MA[]= { "et", "acpi", "lbl", "ast", "cnd", NULL };
+static const char *FCNT_ANNC_OA[]= { "daci", "loc", "or", "nl", "mni", "mia", "mbs",
+                                     "cni", "cbs", NULL };
+static const char *CSE_ANNC_MA[] = { "acpi", "lbl", "srv", NULL };   // et synthesised in create_remote_cba
+static const char *CSE_ANNC_OA[] = { NULL };
+
+const AnncAttrDef ANNC_ATTR_TABLE[] = {
+	{ RT_AE,   AE_ANNC_MA,   AE_ANNC_OA   },
+	{ RT_CNT,  CNT_ANNC_MA,  CNT_ANNC_OA  },
+	{ RT_CIN,  CIN_ANNC_MA,  CIN_ANNC_OA  },
+	{ RT_GRP,  GRP_ANNC_MA,  GRP_ANNC_OA  },
+	{ RT_ACP,  ACP_ANNC_MA,  ACP_ANNC_OA  },
+	{ RT_TS,   TS_ANNC_MA,   TS_ANNC_OA   },
+	{ RT_FCNT, FCNT_ANNC_MA, FCNT_ANNC_OA },
+	{ RT_CSE,  CSE_ANNC_MA,  CSE_ANNC_OA  },
+	{ RT_MIXED, NULL, NULL },
 };
 
 char *PORT = SERVER_PORT;
@@ -104,6 +164,10 @@ static ssize_t cmdline_read_key(char *arg, unsigned char **buf, size_t maxlen)
 int main(int argc, char **argv)
 {
 	signal(SIGINT, stop_server);
+	// A peer that closes the connection before we write the response (common with
+	// conformance testers that have short timeouts) must not kill the process:
+	// write() then returns -1/EPIPE instead of raising SIGPIPE.
+	signal(SIGPIPE, SIG_IGN);
 	logger_init();
 
 #if MONO_THREAD == 0
@@ -111,6 +175,9 @@ int main(int argc, char **argv)
 	pthread_mutexattr_settype(&Attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutex_init(&main_lock, &Attr);
 	pthread_mutex_init(&csr_lock, NULL);
+#endif
+#ifdef UPPERTESTER
+	pthread_rwlock_init(&g_reset_lock, NULL);
 #endif
 	// Attributes for resources
 	// all attributes are verified in validate_sub_attr in util.c
@@ -238,21 +305,41 @@ int main(int argc, char **argv)
 	return 0;
 }
 
+static void route_onem2m(oneM2MPrimitive *o2pt, double start);
+
 void route(oneM2MPrimitive *o2pt)
 {
-	int rsc = 0;
-	double start;
-
-	start = (double)clock() / CLOCKS_PER_SEC; // runtime check - start
+	double start = (double)clock() / CLOCKS_PER_SEC; // runtime check - start
 
 #ifdef UPPERTESTER
 	if (o2pt->op == OP_UPPERTESTER)
 	{
-		handle_uppertester_procedure(o2pt);
+		handle_uppertester_procedure(o2pt);   // may run reset_cse() -> wrlock; must NOT hold rdlock here
 		log_runtime(start);
 		return;
 	}
+/* ========== DEBUG TRACE — delete these [DBG] lines later ========== */
+	if (pthread_rwlock_tryrdlock(&g_reset_lock) != 0)
+	{
+		logger("MAIN", LOG_LEVEL_WARN, "[DBG] route(): request BLOCKED - reset in progress, waiting... (op=%d to=%s)",
+		       o2pt->op, o2pt->to ? o2pt->to : "-");
+		pthread_rwlock_rdlock(&g_reset_lock);
+		logger("MAIN", LOG_LEVEL_WARN, "[DBG] route(): resumed after reset");
+	}
+/* ===== end trace; the plain line below is the real one ===== */
+	// pthread_rwlock_rdlock(&g_reset_lock);
 #endif
+
+	route_onem2m(o2pt, start);
+
+#ifdef UPPERTESTER
+	pthread_rwlock_unlock(&g_reset_lock);
+#endif
+}
+
+static void route_onem2m(oneM2MPrimitive *o2pt, double start)
+{
+	int rsc = 0;
 
 	RTNode *target_rtnode = get_rtnode(o2pt);
 

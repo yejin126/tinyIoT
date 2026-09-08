@@ -227,25 +227,9 @@ int validate_cin(oneM2MPrimitive *o2pt, cJSON *parent_cnt, cJSON *cin, Operation
             return handle_error(o2pt, RSC_BAD_REQUEST, "attribute `cnf` is invalid");
         }
     }
-    cJSON *aa = cJSON_GetObjectItem(cin, "aa");
-    if (aa && CSE_RVI < RVI_3)
-    {
-        return handle_error(o2pt, RSC_BAD_REQUEST, "attribute `aa` is not supported");
-    }
-    cJSON *attr = cJSON_GetObjectItem(ATTRIBUTES, get_resource_key(RT_CIN));
-    cJSON_ArrayForEach(pjson, aa)
-    {
-        if (strcmp(pjson->valuestring, "lbl") == 0)
-            continue;
-        if (strcmp(pjson->valuestring, "ast") == 0)
-            continue;
-        if (strcmp(pjson->valuestring, "lnk") == 0)
-            continue;
-        if (!cJSON_GetObjectItem(attr, pjson->valuestring))
-        {
-            return handle_error(o2pt, RSC_BAD_REQUEST, "invalid attribute in `aa`");
-        }
-    }
+#if CSE_RVI >= RVI_3
+    validate_aa(o2pt, cin, RT_CIN);
+#endif
 
     return RSC_OK;
 }

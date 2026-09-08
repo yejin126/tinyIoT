@@ -148,14 +148,7 @@ int update_ae(oneM2MPrimitive *o2pt, RTNode *target_rtnode)
         logger("O2", LOG_LEVEL_ERROR, "validation failed");
         return result;
     }
-    cJSON *at = NULL;
-    if ((at = cJSON_GetObjectItem(m2m_ae, "at")))
-    {
-        cJSON *final_at = cJSON_CreateArray();
-        handle_annc_update(target_rtnode, at, final_at);
-        cJSON_DeleteItemFromObject(m2m_ae, "at");
-        cJSON_AddItemToObject(m2m_ae, "at", final_at);
-    }
+    process_annc_at_update(target_rtnode, m2m_ae);
     cJSON_AddItemToObject(m2m_ae, "lt", cJSON_CreateString(get_local_time(0)));
 
     // merge update resource
@@ -237,50 +230,9 @@ int validate_ae(oneM2MPrimitive *o2pt, cJSON *ae, Operation op)
             return handle_error(o2pt, RSC_BAD_REQUEST, "attribute `rn` is invalid");
         }
     }
-    cJSON *attrs = cJSON_GetObjectItem(ATTRIBUTES, "m2m:ae");
-    cJSON *general = cJSON_GetObjectItem(ATTRIBUTES, "general");
-
-    if (cJSON_GetObjectItem(ae, "aa"))
-    {
-        if (CSE_RVI < RVI_3)
-            return handle_error(o2pt, RSC_BAD_REQUEST, "`aa` attribute is not supported");
-        cJSON *aa_final = cJSON_CreateArray();
-        cJSON_ArrayForEach(pjson, cJSON_GetObjectItem(ae, "aa"))
-        {
-            if (strcmp(pjson->valuestring, "ri") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "pi") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "rn") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "ct") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "lt") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "et") == 0)
-                continue;
-            if (strcmp(pjson->valuestring, "acpi") == 0)
-                continue;
-
-            if (cJSON_GetObjectItem(general, pjson->valuestring) || cJSON_GetObjectItem(attrs, pjson->valuestring))
-            {
-                cJSON_AddItemToArray(aa_final, cJSON_CreateString(pjson->valuestring));
-            }
-            else
-            {
-                return handle_error(o2pt, RSC_BAD_REQUEST, "attribute `aa` is invalid");
-            }
-        }
-        if (cJSON_GetArraySize(aa_final) > 0)
-        {
-            cJSON_ReplaceItemInObject(ae, "aa", aa_final);
-        }
-        else
-        {
-            cJSON_DeleteItemFromObject(ae, "aa");
-            cJSON_AddItemToObject(ae, "aa", cJSON_CreateNull());
-        }
-    }
+#if CSE_RVI >= RVI_3
+    validate_aa(o2pt, ae, RT_AE);
+#endif
 
     if ((pjson = cJSON_GetObjectItem(ae, "at")))
     {
