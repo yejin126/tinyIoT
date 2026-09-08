@@ -11,8 +11,7 @@
 
 bool init_server();
 
-bool bootstrap_cse(void);
-bool bootstrap_cse_ex(bool require_registration);
+bool bootstrap_cse();
 
 #ifdef UPPERTESTER
 int reset_cse();

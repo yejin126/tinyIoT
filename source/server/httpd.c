@@ -17,7 +17,6 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <fcntl.h>
-#include <errno.h>
 
 #define MAX_CONNECTIONS 1024
 #define BUF_SIZE 65535
@@ -197,19 +196,11 @@ void respond(int slot)
     int rcvd;
     char buffer[BUF_SIZE] = {0};
     buf[slot] = malloc(BUF_SIZE * sizeof(char));
-/* ========== DEBUG TRACE (wire input) — delete this block later ========== */
-    errno = 0;
-/* ====================================================================== */
     rcvd = recv(clients[slot], buf[slot], BUF_SIZE, 0);
-
-/* ========== DEBUG TRACE — delete this block later ========== */
-    logger("HTTP", LOG_LEVEL_INFO, "[DBG] recv() slot=%d returned %d (errno=%d %s)",
-           slot, rcvd, errno, rcvd < 0 ? strerror(errno) : "");
-/* ========================================================== */
 
     if (rcvd < 0)
     { // receive error
-        logger("HTTP", LOG_LEVEL_ERROR, "recv() error"); /* [DBG] see errno line above */
+        logger("HTTP", LOG_LEVEL_ERROR, "recv() error");
         return;
     }
     else if (rcvd == 0)
@@ -224,61 +215,17 @@ void respond(int slot)
     }
     // message received
     buf[slot][rcvd] = '\0';
-
-/* ========== DEBUG TRACE (how much arrived) — delete this block later ========== */
-    {
-        char *he = strstr(buf[slot], "\r\n\r\n");
-        int hdr_len = he ? (int)(he - buf[slot]) + 4 : -1;
-        char first_line[128] = {0};
-        char *nl = strstr(buf[slot], "\r\n");
-        snprintf(first_line, sizeof(first_line), "%.*s",
-                 nl ? (int)(nl - buf[slot]) : (rcvd < 120 ? rcvd : 120), buf[slot]);
-        logger("HTTP", LOG_LEVEL_INFO,
-               "[DBG] request line: \"%s\" | %d bytes received | header terminator %s | body-bytes-in-first-recv=%d",
-               first_line, rcvd,
-               he ? "FOUND" : "NOT FOUND (headers incomplete!)",
-               he ? rcvd - hdr_len : 0);
-    }
-/* ========================================================================== */
-
     logger("HTTP", LOG_LEVEL_DEBUG, "\n\n%s\n", buf[slot]);
     memcpy(buffer, buf[slot], rcvd);
 
     parse_http_request(req, buffer);
-
-/* ========== DEBUG TRACE (parse result) — delete this block later ========== */
-    logger("HTTP", LOG_LEVEL_INFO,
-           "[DBG] parsed: method=%s uri=%s Content-Length=%d body-in-first-recv=%zu",
-           req->method ? req->method : "?", req->uri ? req->uri : "?",
-           req->payload_size, req->payload ? strlen(req->payload) : 0);
-/* ======================================================================= */
-
     if (req->payload_size > 0 && ((req->payload == NULL) || strlen(req->payload) == 0))
     { // if there is payload but it is not in the buffer
-/* ========== DEBUG TRACE — delete this block later ========== */
-        logger("HTTP", LOG_LEVEL_INFO,
-               "[DBG] body not in first recv (CL=%d) - issuing a 2nd recv()", req->payload_size);
-/* ========================================================== */
         if (req->payload != NULL)
             free(req->payload);
         req->payload = (char *)calloc(MAX_PAYLOAD_SIZE, sizeof(char));
-/* ========== DEBUG TRACE — delete this block, restore the plain recv() below ========== */
-        errno = 0;
-        int prcvd = recv(clients[slot], req->payload, MAX_PAYLOAD_SIZE, 0); // receive payload
-        logger("HTTP", LOG_LEVEL_INFO,
-               "[DBG] 2nd recv() got %d bytes (errno=%d %s) - CL said %d",
-               prcvd, errno, prcvd < 0 ? strerror(errno) : "", req->payload_size);
-/*      recv(clients[slot], req->payload, MAX_PAYLOAD_SIZE, 0);  // <- original line */
-/* ================================================================================= */
+        recv(clients[slot], req->payload, MAX_PAYLOAD_SIZE, 0); // receive payload
     }
-/* ========== DEBUG TRACE (truncation warning) — delete this block later ========== */
-    else if (req->payload_size > 0 && req->payload && (int)strlen(req->payload) < req->payload_size)
-    {
-        logger("HTTP", LOG_LEVEL_WARN,
-               "[DBG] body TRUNCATED: have %zu bytes, Content-Length=%d (no further recv)",
-               strlen(req->payload), req->payload_size);
-    }
-/* ============================================================================ */
 
     if (req->payload)
         normalize_payload(req->payload);
@@ -389,20 +336,8 @@ void handle_http_request(HTTPRequest *req, int slotno)
 
 #ifdef UPPERTESTER
     char *utcmd = search_header(req->headers, UPPERTESTER_CMD_HEADER);
-    int ut_uri_match = (o2pt->to && !strcmp(o2pt->to, UPPERTESTER_URI));
-    if (utcmd || ut_uri_match)
+    if (utcmd || (o2pt->to && !strcmp(o2pt->to, UPPERTESTER_URI)))
     {
-/* ========== DEBUG TRACE (UT request detection) — delete this block later ========== */
-        for (header_t *h = req->headers; h; h = h->next)
-            if (h->name)
-                logger("UT", LOG_LEVEL_INFO, "[DBG]   req hdr  %s: %s", h->name, h->value ? h->value : "");
-        logger("UT", LOG_LEVEL_INFO,
-               "[DBG] UT request: method=%s uri=\"%s\" to=\"%s\"  header[%s]=%s  ut-uri-match(%s)=%d",
-               req->method ? req->method : "?", req->uri ? req->uri : "?",
-               o2pt->to ? o2pt->to : "?",
-               UPPERTESTER_CMD_HEADER, utcmd ? utcmd : "(absent)",
-               UPPERTESTER_URI, ut_uri_match);
-/* ============================================================================= */
         o2pt->op = OP_UPPERTESTER;
         if (utcmd)
             o2pt->utcmd = strdup(utcmd);
@@ -611,21 +546,13 @@ void http_respond_to_client(oneM2MPrimitive *o2pt, int slotno)
     sprintf(buf, "%s %d %s\r\n%s%s\r\n", HTTP_PROTOCOL_VERSION, status_code, status_msg, DEFAULT_RESPONSE_HEADERS, response_headers);
     logger("HTTP", LOG_LEVEL_DEBUG, "Response Header: \n%s", buf);
 
-/* ========== DEBUG TRACE (outgoing response) — delete this block later ========== */
-    logger("HTTP", LOG_LEVEL_INFO, "[DBG] respond -> HTTP %d, X-M2M-RSC %d, body %ld bytes (op=%d)",
-           status_code, o2pt->rsc, pc ? (long)strlen(pc) : 0L, o2pt->op);
-/* ========================================================================== */
-
-    errno = 0;
-    if (write(clients[slotno], buf, strlen(buf)) < 0)
-        logger("HTTP", LOG_LEVEL_WARN, "[DBG] write(response header) failed: errno=%d %s (peer closed early?)",
-               errno, strerror(errno));
+    write(clients[slotno], buf, strlen(buf));
 
     if (pc)
     {
         logger("HTTP", LOG_LEVEL_DEBUG, "Response Body: \n%s", pc);
-        if (write(clients[slotno], pc, strlen(pc)) < 0 || write(clients[slotno], "\r\n", 2) < 0)
-            logger("HTTP", LOG_LEVEL_WARN, "[DBG] write(response body) failed: errno=%d %s", errno, strerror(errno));
+        write(clients[slotno], pc, strlen(pc));
+        write(clients[slotno], "\r\n", 2);
     }
 
     if (pc)
