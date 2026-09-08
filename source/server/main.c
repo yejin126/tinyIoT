@@ -38,12 +38,6 @@ pthread_mutexattr_t Attr;
 
 #endif
 
-#ifdef UPPERTESTER
-// request threads take this rdlock for the whole of route(); reset_cse() takes
-// the wrlock so it can tear down / rebuild `rt` with no request touching it.
-pthread_rwlock_t g_reset_lock;
-#endif
-
 void route(oneM2MPrimitive *o2pt);
 void stop_server(int sig);
 void log_runtime(double start);
@@ -164,10 +158,6 @@ static ssize_t cmdline_read_key(char *arg, unsigned char **buf, size_t maxlen)
 int main(int argc, char **argv)
 {
 	signal(SIGINT, stop_server);
-	// A peer that closes the connection before we write the response (common with
-	// conformance testers that have short timeouts) must not kill the process:
-	// write() then returns -1/EPIPE instead of raising SIGPIPE.
-	signal(SIGPIPE, SIG_IGN);
 	logger_init();
 
 #if MONO_THREAD == 0
@@ -175,9 +165,6 @@ int main(int argc, char **argv)
 	pthread_mutexattr_settype(&Attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutex_init(&main_lock, &Attr);
 	pthread_mutex_init(&csr_lock, NULL);
-#endif
-#ifdef UPPERTESTER
-	pthread_rwlock_init(&g_reset_lock, NULL);
 #endif
 	// Attributes for resources
 	// all attributes are verified in validate_sub_attr in util.c
@@ -305,41 +292,21 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-static void route_onem2m(oneM2MPrimitive *o2pt, double start);
-
 void route(oneM2MPrimitive *o2pt)
 {
-	double start = (double)clock() / CLOCKS_PER_SEC; // runtime check - start
+	int rsc = 0;
+	double start;
+
+	start = (double)clock() / CLOCKS_PER_SEC; // runtime check - start
 
 #ifdef UPPERTESTER
 	if (o2pt->op == OP_UPPERTESTER)
 	{
-		handle_uppertester_procedure(o2pt);   // may run reset_cse() -> wrlock; must NOT hold rdlock here
+		handle_uppertester_procedure(o2pt);
 		log_runtime(start);
 		return;
 	}
-/* ========== DEBUG TRACE — delete these [DBG] lines later ========== */
-	if (pthread_rwlock_tryrdlock(&g_reset_lock) != 0)
-	{
-		logger("MAIN", LOG_LEVEL_WARN, "[DBG] route(): request BLOCKED - reset in progress, waiting... (op=%d to=%s)",
-		       o2pt->op, o2pt->to ? o2pt->to : "-");
-		pthread_rwlock_rdlock(&g_reset_lock);
-		logger("MAIN", LOG_LEVEL_WARN, "[DBG] route(): resumed after reset");
-	}
-/* ===== end trace; the plain line below is the real one ===== */
-	// pthread_rwlock_rdlock(&g_reset_lock);
 #endif
-
-	route_onem2m(o2pt, start);
-
-#ifdef UPPERTESTER
-	pthread_rwlock_unlock(&g_reset_lock);
-#endif
-}
-
-static void route_onem2m(oneM2MPrimitive *o2pt, double start)
-{
-	int rsc = 0;
 
 	RTNode *target_rtnode = get_rtnode(o2pt);
 

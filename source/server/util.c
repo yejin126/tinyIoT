@@ -1294,12 +1294,7 @@ bool init_server()
 	return setup;
 }
 
-/**
- * @param require_registration  when true (normal startup) a failed registrar
- *        registration fails the bootstrap; when false (Upper Tester reset) the
- *        local CSE is still considered reset and registration is best-effort.
- */
-bool bootstrap_cse_ex(bool require_registration)
+bool bootstrap_cse()
 {
 	bool initialBoot = init_server();
 
@@ -1316,44 +1311,29 @@ bool bootstrap_cse_ex(bool require_registration)
 
 	if (SERVER_TYPE == MN_CSE || SERVER_TYPE == ASN_CSE)
 	{
-		bool reg_ok = (register_remote_cse() == 0) && (create_local_csr() == 0);
-		if (!reg_ok)
+		if (register_remote_cse() != 0)
 		{
-			logger("UTIL", LOG_LEVEL_ERROR, "Remote CSE registration failed%s",
-			       require_registration ? "" : " (best-effort; local reset kept)");
-			if (require_registration)
-				return false;
+			logger("UTIL", LOG_LEVEL_ERROR, "Remote CSE registration failed");
+			return false;
+		}
+		if (create_local_csr())
+		{
+			logger("UTIL", LOG_LEVEL_ERROR, "Local CSR creation failed");
+			return false;
 		}
 	}
 
 	return true;
 }
 
-bool bootstrap_cse(void)
-{
-	return bootstrap_cse_ex(true);
-}
-
 #ifdef UPPERTESTER
-extern pthread_rwlock_t g_reset_lock;
-
 int reset_cse()
 {
 	logger("UTIL", LOG_LEVEL_INFO, "reset_cse: bringing CSE back to factory state");
 
-	// Exclude every in-flight / incoming request thread for the whole teardown +
-	// rebuild (route() holds this as a rdlock). main_lock additionally serialises
-	// the monitor / notification threads.
-/* ========== DEBUG TRACE — delete these [DBG] lines later ========== */
-	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: acquiring g_reset_lock (wr) - waiting for in-flight requests to drain...");
-/* =============================================================== */
-	pthread_rwlock_wrlock(&g_reset_lock);
 #if MONO_THREAD == 0
 	pthread_mutex_lock(&main_lock);
 #endif
-/* ========== DEBUG TRACE — delete this line later ========== */
-	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: all locks held, tearing down tree");
-/* ======================================================== */
 
 	// 1) Drop the in-memory resource tree (mirrors stop_server teardown).
 	if (rt)
@@ -1366,28 +1346,25 @@ int reset_cse()
 	}
 
 	// 2) Wipe every stored resource.
-	bool db_ok = db_reset_all();
-/* ========== DEBUG TRACE — delete this line later ========== */
-	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: db_reset_all -> %d, rebuilding (bootstrap)", db_ok);
-/* ======================================================== */
+	if (!db_reset_all())
+	{
+#if MONO_THREAD == 0
+		pthread_mutex_unlock(&main_lock);
+#endif
+		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: db_reset_all failed");
+		return -1;
+	}
 
 	// 3) Rebuild from scratch (init_server sees an empty DB -> initialBoot path).
-	//    Registrar re-registration is best-effort: a transient ACME hiccup must
-	//    not turn a successful local reset into a 4000.
-	bool ok = db_ok && bootstrap_cse_ex(false);
+	bool ok = bootstrap_cse();
 
 #if MONO_THREAD == 0
 	pthread_mutex_unlock(&main_lock);
 #endif
-	pthread_rwlock_unlock(&g_reset_lock);
-/* ========== DEBUG TRACE — delete this line later ========== */
-	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: locks released (ok=%d)", ok);
-/* ======================================================== */
 
 	if (!ok)
 	{
-		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: %s failed",
-		       db_ok ? "bootstrap_cse" : "db_reset_all");
+		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: bootstrap_cse failed");
 		return -1;
 	}
 	logger("UTIL", LOG_LEVEL_INFO, "reset_cse: done");
