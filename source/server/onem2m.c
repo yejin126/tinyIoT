@@ -256,6 +256,24 @@ RTNode *create_rtnode(cJSON *obj, ResourceType ty)
 			}
 		}
 	}
+	// `mdd` is persisted as an INTEGER column, so a resource restored from the DB
+	// carries it as a number. Restore the boolean type here, otherwise
+	// cJSON_IsTrue(mdd) is false for every TS loaded at start-up and missing-data
+	// detection silently stops working after a restart.
+	if ((pjson = cJSON_GetObjectItem(obj, "mdd")))
+	{
+		if (pjson->type != cJSON_True && pjson->type != cJSON_False)
+		{
+			if (pjson->valueint == 1)
+			{
+				cJSON_ReplaceItemInObject(obj, "mdd", cJSON_CreateTrue());
+			}
+			else
+			{
+				cJSON_ReplaceItemInObject(obj, "mdd", cJSON_CreateFalse());
+			}
+		}
+	}
 	rtnode->rn = strdup(cJSON_GetObjectItem(obj, "rn")->valuestring);
 
 	return rtnode;
