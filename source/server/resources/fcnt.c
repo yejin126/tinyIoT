@@ -427,14 +427,7 @@ int update_fcnt(oneM2MPrimitive *o2pt, RTNode *target_rtnode)
 		return result;
 	}
 
-	cJSON *at = NULL;
-	if ((at = cJSON_GetObjectItem(m2m_fcnt, "at")))
-	{
-		cJSON *final_at = cJSON_CreateArray();
-		handle_annc_update(target_rtnode, at, final_at);
-		cJSON_DeleteItemFromObject(m2m_fcnt, "at");
-		cJSON_AddItemToObject(m2m_fcnt, "at", final_at);
-	}
+	process_annc_at_update(target_rtnode, m2m_fcnt);
 
 	char *lt = get_local_time(0);
 	cJSON_AddItemToObject(m2m_fcnt, "lt", cJSON_CreateString(lt));

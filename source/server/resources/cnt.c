@@ -132,14 +132,7 @@ int update_cnt(oneM2MPrimitive *o2pt, RTNode *target_rtnode)
     cJSON_AddNumberToObject(m2m_cnt, "st", cJSON_GetObjectItem(cnt, "st")->valueint + 1);
 
 #if CSE_RVI >= RVI_3
-    cJSON *at = NULL;
-    if ((at = cJSON_GetObjectItem(m2m_cnt, "at")))
-    {
-        cJSON *final_at = cJSON_CreateArray();
-        handle_annc_update(target_rtnode, at, final_at);
-        cJSON_DeleteItemFromObject(m2m_cnt, "at");
-        cJSON_AddItemToObject(m2m_cnt, "at", final_at);
-    }
+    process_annc_at_update(target_rtnode, m2m_cnt);
 #endif
 
     cJSON_AddItemToObject(m2m_cnt, "lt", cJSON_CreateString(get_local_time(0)));
@@ -245,21 +238,9 @@ int validate_cnt(oneM2MPrimitive *o2pt, cJSON *cnt, Operation op)
         return RSC_BAD_REQUEST;
     }
 
-    cJSON *aa = cJSON_GetObjectItem(cnt, "aa");
-    cJSON *attr = cJSON_GetObjectItem(ATTRIBUTES, get_resource_key(RT_CNT));
-    cJSON_ArrayForEach(pjson, aa)
-    {
-        if (strcmp(pjson->valuestring, "lbl") == 0)
-            continue;
-        if (strcmp(pjson->valuestring, "ast") == 0)
-            continue;
-        if (strcmp(pjson->valuestring, "lnk") == 0)
-            continue;
-        if (!cJSON_GetObjectItem(attr, pjson->valuestring))
-        {
-            return handle_error(o2pt, RSC_BAD_REQUEST, "invalid attribute in `aa`");
-        }
-    }
+#if CSE_RVI >= RVI_3
+    validate_aa(o2pt, cnt, RT_CNT);
+#endif
 
     return RSC_OK;
 }

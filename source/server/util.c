@@ -8,6 +8,7 @@
 #include <limits.h>
 #include <sys/timeb.h>
 #include <sys/ioctl.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 
@@ -1293,7 +1294,12 @@ bool init_server()
 	return setup;
 }
 
-bool bootstrap_cse()
+/**
+ * @param require_registration  when true (normal startup) a failed registrar
+ *        registration fails the bootstrap; when false (Upper Tester reset) the
+ *        local CSE is still considered reset and registration is best-effort.
+ */
+bool bootstrap_cse_ex(bool require_registration)
 {
 	bool initialBoot = init_server();
 
@@ -1310,29 +1316,44 @@ bool bootstrap_cse()
 
 	if (SERVER_TYPE == MN_CSE || SERVER_TYPE == ASN_CSE)
 	{
-		if (register_remote_cse() != 0)
+		bool reg_ok = (register_remote_cse() == 0) && (create_local_csr() == 0);
+		if (!reg_ok)
 		{
-			logger("UTIL", LOG_LEVEL_ERROR, "Remote CSE registration failed");
-			return false;
-		}
-		if (create_local_csr())
-		{
-			logger("UTIL", LOG_LEVEL_ERROR, "Local CSR creation failed");
-			return false;
+			logger("UTIL", LOG_LEVEL_ERROR, "Remote CSE registration failed%s",
+			       require_registration ? "" : " (best-effort; local reset kept)");
+			if (require_registration)
+				return false;
 		}
 	}
 
 	return true;
 }
 
+bool bootstrap_cse(void)
+{
+	return bootstrap_cse_ex(true);
+}
+
 #ifdef UPPERTESTER
+extern pthread_rwlock_t g_reset_lock;
+
 int reset_cse()
 {
 	logger("UTIL", LOG_LEVEL_INFO, "reset_cse: bringing CSE back to factory state");
 
+	// Exclude every in-flight / incoming request thread for the whole teardown +
+	// rebuild (route() holds this as a rdlock). main_lock additionally serialises
+	// the monitor / notification threads.
+/* ========== DEBUG TRACE — delete these [DBG] lines later ========== */
+	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: acquiring g_reset_lock (wr) - waiting for in-flight requests to drain...");
+/* =============================================================== */
+	pthread_rwlock_wrlock(&g_reset_lock);
 #if MONO_THREAD == 0
 	pthread_mutex_lock(&main_lock);
 #endif
+/* ========== DEBUG TRACE — delete this line later ========== */
+	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: all locks held, tearing down tree");
+/* ======================================================== */
 
 	// 1) Drop the in-memory resource tree (mirrors stop_server teardown).
 	if (rt)
@@ -1345,25 +1366,28 @@ int reset_cse()
 	}
 
 	// 2) Wipe every stored resource.
-	if (!db_reset_all())
-	{
-#if MONO_THREAD == 0
-		pthread_mutex_unlock(&main_lock);
-#endif
-		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: db_reset_all failed");
-		return -1;
-	}
+	bool db_ok = db_reset_all();
+/* ========== DEBUG TRACE — delete this line later ========== */
+	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: db_reset_all -> %d, rebuilding (bootstrap)", db_ok);
+/* ======================================================== */
 
 	// 3) Rebuild from scratch (init_server sees an empty DB -> initialBoot path).
-	bool ok = bootstrap_cse();
+	//    Registrar re-registration is best-effort: a transient ACME hiccup must
+	//    not turn a successful local reset into a 4000.
+	bool ok = db_ok && bootstrap_cse_ex(false);
 
 #if MONO_THREAD == 0
 	pthread_mutex_unlock(&main_lock);
 #endif
+	pthread_rwlock_unlock(&g_reset_lock);
+/* ========== DEBUG TRACE — delete this line later ========== */
+	logger("UTIL", LOG_LEVEL_INFO, "[DBG] reset: locks released (ok=%d)", ok);
+/* ======================================================== */
 
 	if (!ok)
 	{
-		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: bootstrap_cse failed");
+		logger("UTIL", LOG_LEVEL_ERROR, "reset_cse: %s failed",
+		       db_ok ? "bootstrap_cse" : "db_reset_all");
 		return -1;
 	}
 	logger("UTIL", LOG_LEVEL_INFO, "reset_cse: done");
@@ -3941,8 +3965,10 @@ void update_resource(cJSON* old_obj, cJSON* new_obj)
 				cJSON_ReplaceItemInObject(old_obj, pjson->string, cJSON_Duplicate(pjson, 1));
 			}
 		}
-		else
+		else if (pjson->type != cJSON_NULL)
 		{
+			// `attr: null` for an attribute that isn't present is a no-op delete,
+			// not "store a null" (which would then surface in the response).
 			cJSON_AddItemToObject(old_obj, pjson->string, cJSON_Duplicate(pjson, 1));
 		}
 		pjson = pjson->next;
@@ -4100,16 +4126,25 @@ bool is_attr_valid(cJSON* obj, ResourceType ty, char* err_msg)
 	return true;
 }
 
-static const char *const *get_ma_fields(ResourceType ty) {
-	for (int i = 0; MA_TABLE[i].ty != RT_MIXED; i++) {
-		if (MA_TABLE[i].ty == ty) return MA_TABLE[i].ma_fields;
+// create-mandatory (M) attribute short-names for `ty`, NULL-terminated (or NULL)
+static const char *const *get_create_m_fields(ResourceType ty) {
+	for (int i = 0; M_TABLE[i].ty != RT_MIXED; i++) {
+		if (M_TABLE[i].ty == ty) return M_TABLE[i].m;
+	}
+	return NULL;
+}
+
+// create-optional (O) attribute short-names for `ty`, NULL-terminated (or NULL)
+static const char *const *get_create_o_fields(ResourceType ty) {
+	for (int i = 0; M_TABLE[i].ty != RT_MIXED; i++) {
+		if (M_TABLE[i].ty == ty) return M_TABLE[i].o;
 	}
 	return NULL;
 }
 
 int validate_mandatory_attrs(ResourceType ty, cJSON *obj, Operation op, char **error_msg)
 {
-	const char *const *ma_fields = get_ma_fields(ty);
+	const char *const *ma_fields = get_create_m_fields(ty);
 	if (!ma_fields || !obj) return RSC_OK;
 
 	for (int i = 0; ma_fields[i] != NULL; i++) {
@@ -4892,10 +4927,10 @@ int handle_annc_update(RTNode* target_rtnode, cJSON* at_obj, cJSON* final_at)
 	logger("UTIL", LOG_LEVEL_DEBUG, "register_at_list: %s", cJSON_PrintUnformatted(register_at_list));
 	logger("UTIL", LOG_LEVEL_DEBUG, "delete_at_list: %s", cJSON_PrintUnformatted(delete_at_list));
 
-	// deregister removed remote aea
+	// deregister removed remote annc; a target whose DELETE fails is kept in `at`
 	if (cJSON_GetArraySize(delete_at_list) > 0)
 	{
-		deregister_remote_annc(target_rtnode, delete_at_list);
+		deregister_remote_annc(target_rtnode, delete_at_list, final_at);
 	}
 
 	cJSON_Delete(delete_at_list);
@@ -4918,19 +4953,41 @@ int handle_annc_update(RTNode* target_rtnode, cJSON* at_obj, cJSON* final_at)
 	return 0;
 }
 
+void process_annc_at_update(RTNode *target_rtnode, cJSON *body)
+{
+	cJSON *at = cJSON_GetObjectItem(body, "at");
+	if (!at)
+		return;
+
+	if (cJSON_IsNull(at))
+	{
+		cJSON *tmp = cJSON_CreateArray();
+		handle_annc_update(target_rtnode, at, tmp);  
+		cJSON_Delete(tmp);
+		if (!cJSON_GetObjectItem(target_rtnode->obj, "at"))
+			cJSON_DeleteItemFromObject(body, "at");   
+		return;
+	}
+
+	cJSON *final_at = cJSON_CreateArray();
+	handle_annc_update(target_rtnode, at, final_at);
+	cJSON_DeleteItemFromObject(body, "at");
+	cJSON_AddItemToObject(body, "at", final_at);
+}
+
 /**
- * @brief delete remote annc resource
+ * @brief delete remote annc resources
  * @param target_rtnode target rtnode
- * @param delete_at_list cJSON Array of deleting announceTo
- * @return 0 on success, -1 on failure
+ * @param delete_at_list cJSON Array of announceTo entries to de-announce
+ * @param keep_out  optional cJSON array; each entry whose remote DELETE failed
+ *                  is appended here so the caller can keep it in the resource's
+ *                  `at` (i.e. a failed de-announce is ignored, not lost)
+ * @return 0 always (individual failures are logged and skipped)
  */
-int deregister_remote_annc(RTNode* target_rtnode, cJSON* delete_at_list)
+int deregister_remote_annc(RTNode* target_rtnode, cJSON* delete_at_list, cJSON* keep_out)
 {
 	logger("UTIL", LOG_LEVEL_DEBUG, "deregister_remote_annc");
-	char buf[256] = { 0 };
-	bool annc = false;
 
-	// Check Parent Resource has attribute at
 	cJSON* at = NULL;
 	cJSON_ArrayForEach(at, delete_at_list)
 	{
@@ -4945,13 +5002,17 @@ int deregister_remote_annc(RTNode* target_rtnode, cJSON* delete_at_list)
 			o2pt->rqi = strdup("delete-annc");
 			o2pt->rvi = CSE_RVI;
 			forwarding_onem2m_resource(o2pt, find_csr_rtnode_by_uri(at->valuestring));
-
-			if (o2pt->rsc != RSC_DELETED)
-			{
-				logger("UTIL", LOG_LEVEL_ERROR, "Deletion failed");
-				return -1;
-			}
+			int rsc = o2pt->rsc;
 			free_o2pt(o2pt);
+
+			// RSC_NOT_FOUND == already gone remotely -> treat as success
+			if (rsc != RSC_DELETED && rsc != RSC_NOT_FOUND)
+			{
+				logger("UTIL", LOG_LEVEL_WARN, "de-announce failed (rsc %d), keeping %s", rsc, at->valuestring);
+				if (keep_out)
+					cJSON_AddItemToArray(keep_out, cJSON_CreateString(at->valuestring));
+				continue;   // skip local cleanup, move on to the next target
+			}
 		}
 		char* tokPtr;
 		char* ptr = strtok_r(at->valuestring + 1, "/", &tokPtr);
@@ -5026,58 +5087,32 @@ void removeChildAnnc(RTNode* parent_rtnode, char* at)
 	}
 }
 
-static bool annc_attr_excluded(const char *n)
+// ── Announced-attribute classification (ANNC_ATTR_TABLE, TS-0001 §9.6.x) ──
+// MA = always projected; OA = projected only if in `aa`; anything else = NA.
+
+static const char *const *annc_ma_fields(ResourceType ty)
 {
-	static const char *ex[] = { "rn", "ri", "pi", "ct", "lt", "ty", "uri", "at", "aa", "lnk", NULL };
-	for (int i = 0; ex[i]; i++)
-		if (!strcmp(ex[i], n)) return true;
+	for (int i = 0; ANNC_ATTR_TABLE[i].ty != RT_MIXED; i++)
+		if (ANNC_ATTR_TABLE[i].ty == ty) return ANNC_ATTR_TABLE[i].ma;
+	return NULL;
+}
+
+static const char *const *annc_oa_fields(ResourceType ty)
+{
+	for (int i = 0; ANNC_ATTR_TABLE[i].ty != RT_MIXED; i++)
+		if (ANNC_ATTR_TABLE[i].ty == ty) return ANNC_ATTR_TABLE[i].oa;
+	return NULL;
+}
+
+static bool str_in(const char *const *list, const char *n)
+{
+	for (int i = 0; list && list[i]; i++)
+		if (!strcmp(list[i], n)) return true;
 	return false;
 }
 
-// Common (universal/common) Mandatory-Announced attributes, for every announced resource.
-static const char *ANNC_COMMON_MA[] = { "et", "lbl", "acpi", "ast", "srv", NULL };
-
-// Per-type Mandatory-Announced attributes that MA_TABLE (a create-mandatory list) does
-// not carry — e.g. server-generated identities, group state.
-static const char *const *extra_annc_ma(ResourceType ty)
-{
-	static const char *AE_X[]  = { "aei", NULL };
-	static const char *GRP_X[] = { "mt", "cnm", "mnm", "csy", NULL };
-	switch (ty)
-	{
-	case RT_AE:  return AE_X;
-	case RT_GRP: return GRP_X;
-	default:     return NULL;
-	}
-}
-
-// Mandatory-Announced attribute for resource type `ty`?
-// Common MA + per-type MA from MA_TABLE + per-type extras.
-static bool annc_attr_is_ma(ResourceType ty, const char *n)
-{
-	for (int i = 0; ANNC_COMMON_MA[i]; i++)
-		if (!strcmp(ANNC_COMMON_MA[i], n)) return true;
-
-	const char *const *ma = get_ma_fields(ty);
-	for (int i = 0; ma && ma[i]; i++)
-		if (!strcmp(ma[i], n)) return true;
-
-	const char *const *xma = extra_annc_ma(ty);
-	for (int i = 0; xma && xma[i]; i++)
-		if (!strcmp(xma[i], n)) return true;
-
-	return false;
-}
-
-// Valid Optionally-Announced attribute for `ty`? (a real attribute of the type or
-// a common attribute, not excluded, not already Mandatory-Announced)
-static bool annc_attr_is_oa(ResourceType ty, const char *n)
-{
-	if (annc_attr_excluded(n) || annc_attr_is_ma(ty, n)) return false;
-	cJSON *ta = cJSON_GetObjectItem(ATTRIBUTES, get_resource_key(ty));
-	cJSON *ga = cJSON_GetObjectItem(ATTRIBUTES, "general");
-	return (ta && cJSON_GetObjectItem(ta, n)) || (ga && cJSON_GetObjectItem(ga, n));
-}
+static bool annc_attr_is_ma(ResourceType ty, const char *n) { return str_in(annc_ma_fields(ty), n); }
+static bool annc_attr_is_oa(ResourceType ty, const char *n) { return str_in(annc_oa_fields(ty), n); }
 
 // Copy `name` from `src` to `dst` (deep, once) if present on `src`.
 static void annc_copy(cJSON *dst, cJSON *src, const char *name)
@@ -5089,33 +5124,51 @@ static void annc_copy(cJSON *dst, cJSON *src, const char *name)
 
 int build_annc_attrs(cJSON *dst, cJSON *src, ResourceType ty)
 {
-	// Mandatory-Announced: copy every MA attribute present on the original.
-	for (int i = 0; ANNC_COMMON_MA[i]; i++)
-		annc_copy(dst, src, ANNC_COMMON_MA[i]);
-
-	const char *const *ma = get_ma_fields(ty);
+	const char *const *ma = annc_ma_fields(ty);
 	for (int i = 0; ma && ma[i]; i++)
 		annc_copy(dst, src, ma[i]);
 
-	const char *const *xma = extra_annc_ma(ty);
-	for (int i = 0; xma && xma[i]; i++)
-		annc_copy(dst, src, xma[i]);
-
-	// Optionally-Announced: copy every attribute listed in `aa` (validate first).
 	cJSON *a;
 	cJSON_ArrayForEach(a, cJSON_GetObjectItem(src, "aa"))
 	{
-		if (!cJSON_IsString(a) || !a->valuestring) continue;
-		const char *n = a->valuestring;
-		if (annc_attr_excluded(n) || annc_attr_is_ma(ty, n)) continue; // MA already handled; be lenient
-		if (!annc_attr_is_oa(ty, n))
-		{
-			logger("UTIL", LOG_LEVEL_ERROR, "aa: '%s' is not an announceable attribute of type %d", n, ty);
-			return -1;
-		}
-		annc_copy(dst, src, n);
+		if (cJSON_IsString(a) && a->valuestring && annc_attr_is_oa(ty, a->valuestring))
+			annc_copy(dst, src, a->valuestring);
+		// non-OA entries are silently ignored (already filtered by validate_aa)
 	}
 	return 0;
+}
+
+void validate_aa(oneM2MPrimitive *o2pt, cJSON *resource, ResourceType ty)
+{
+	cJSON *aa = cJSON_GetObjectItem(resource, "aa");
+	if (!aa || cJSON_IsNull(aa))
+		return;
+
+	cJSON *kept = cJSON_CreateArray();
+	cJSON *e = NULL;
+	cJSON_ArrayForEach(e, aa)   // no-op if `aa` is not an array
+	{
+		if (cJSON_IsString(e) && e->valuestring && annc_attr_is_oa(ty, e->valuestring))
+			cJSON_AddItemToArray(kept, cJSON_CreateString(e->valuestring));
+		// NA / MA / unknown / non-string -> silently dropped
+	}
+
+	if (cJSON_GetArraySize(kept) > 0)
+	{
+		cJSON_ReplaceItemInObject(resource, "aa", kept);
+	}
+	else
+	{
+		// nothing announceable remains
+		cJSON_Delete(kept);
+		if (o2pt && o2pt->op == OP_UPDATE)
+			// keep an explicit null so update_resource() removes `aa` from the
+			// stored resource (rather than leaving a stale list)
+			cJSON_ReplaceItemInObject(resource, "aa", cJSON_CreateNull());
+		else
+			// CREATE: just don't store `aa` at all (no `aa: null` in the response)
+			cJSON_DeleteItemFromObject(resource, "aa");
+	}
 }
 
 void announce_to_annc(oneM2MPrimitive *o2pt, RTNode *target_rtnode, cJSON *prev_aa, cJSON *upd_body)
@@ -5141,7 +5194,7 @@ void announce_to_annc(oneM2MPrimitive *o2pt, RTNode *target_rtnode, cJSON *prev_
 	// handler consumed it.
 	cJSON_ArrayForEach(it, upd_body)
 	{
-		if (!it->string || annc_attr_excluded(it->string)) continue;
+		if (!it->string) continue;
 		if (annc_attr_is_ma(ty, it->string) && (v = cJSON_GetObjectItem(src, it->string)))
 			cJSON_AddItemToObject(resource, it->string, cJSON_Duplicate(v, true));
 	}
@@ -5421,7 +5474,9 @@ bool isValidChildType(ResourceType parent, ResourceType child)
 		break;
 	case RT_CSE:
 		if (child == RT_ACP || child == RT_AE || child == RT_CNT || child == RT_GRP || child == RT_SUB ||
-			child == RT_CSR || child == RT_NOD || child == RT_MGMTOBJ || child == RT_CBA || child == RT_FCNT)
+			child == RT_CSR || child == RT_NOD || child == RT_MGMTOBJ || child == RT_CBA || child == RT_FCNT ||
+			// announced resources may be created directly under <CSEBase> (TS-0001 §9.6.3)
+			child == RT_AEA || child == RT_CNTA || child == RT_GRPA || child == RT_ACPA || child == RT_TSA || child == RT_FCNTA)
 			return true;
 		break;
 	case RT_GRP:
@@ -5440,11 +5495,13 @@ bool isValidChildType(ResourceType parent, ResourceType child)
 			return true;
 		break;
 	case RT_AEA:
-		if (child == RT_SUB || child == RT_CNT || child == RT_CNTA || child == RT_GRP || child == RT_GRPA || child == RT_ACP || child == RT_ACPA || child == RT_TS || child == RT_TSA)
+		if (child == RT_SUB || child == RT_CNTA || child == RT_GRPA || child == RT_ACPA || child == RT_TSA || child == RT_FCNTA ||
+			child == RT_CNT || child == RT_GRP || child == RT_ACP || child == RT_TS)
 			return true;
 		break;
 	case RT_CNTA:
-		if (child == RT_CNT || child == RT_CNTA || child == RT_CIN || child == RT_CINA || child == RT_SUB || child == RT_TS || child == RT_TSA)
+		if (child == RT_SUB || child == RT_CNTA || child == RT_CINA || child == RT_TSA || child == RT_FCNTA ||
+			child == RT_CNT || child == RT_CIN || child == RT_TS)
 			return true;
 		break;
 	case RT_TSA:
@@ -5452,7 +5509,10 @@ bool isValidChildType(ResourceType parent, ResourceType child)
 			return true;
 		break;
 	case RT_CBA:
-		if (child == RT_CNT || child == RT_CNTA || child == RT_GRP || child == RT_GRPA || child == RT_ACP || child == RT_ACPA || child == RT_SUB || child == RT_AEA)
+		if (child == RT_SUB || child == RT_AEA || child == RT_CNTA || child == RT_GRPA ||
+			child == RT_ACPA || child == RT_TSA || child == RT_FCNTA ||
+			// non-announced children are also tolerated (legacy)
+			child == RT_CNT || child == RT_GRP || child == RT_ACP)
 			return true;
 		break;
 	case RT_GRPA:
@@ -5717,21 +5777,9 @@ int validate_fcnt(oneM2MPrimitive *o2pt, cJSON *fcnt, Operation op)
 		}
 	}
 
-	cJSON *aa = cJSON_GetObjectItem(fcnt, "aa");
-	cJSON *attr = cJSON_GetObjectItem(ATTRIBUTES, get_resource_key(RT_FCNT));
-	cJSON_ArrayForEach(pjson, aa)
-	{
-		if (strcmp(pjson->valuestring, "lbl") == 0)
-			continue;
-		if (strcmp(pjson->valuestring, "ast") == 0)
-			continue;
-		if (strcmp(pjson->valuestring, "lnk") == 0)
-			continue;
-		if (!cJSON_GetObjectItem(attr, pjson->valuestring))
-		{
-			return handle_error(o2pt, RSC_BAD_REQUEST, "invalid attribute in `aa`");
-		}
-	}
+#if CSE_RVI >= RVI_3
+	validate_aa(o2pt, fcnt, RT_FCNT);
+#endif
 
 	return RSC_OK;
 }

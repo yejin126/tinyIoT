@@ -35,6 +35,10 @@ int validate_ts(oneM2MPrimitive *o2pt, cJSON *ts, Operation op) {
             return handle_error(o2pt, RSC_BAD_REQUEST, "negative value not allowed");
         }
     }
+
+#if CSE_RVI >= RVI_3
+    validate_aa(o2pt, ts, RT_TS);
+#endif
     return RSC_OK;
 }
 
@@ -258,14 +262,8 @@ int update_ts(oneM2MPrimitive *o2pt, RTNode *target_rtnode) {
     }
 
 #if CSE_RVI >= RVI_3
-    cJSON *at = NULL;
-    if ((at = cJSON_GetObjectItem(ts, "at")))
-    {
-        cJSON *final_at = cJSON_CreateArray();
-        handle_annc_update(target_rtnode, at, final_at);
-        cJSON_DeleteItemFromObject(ts, "at");
-        cJSON_AddItemToObject(ts, "at", final_at);
-    }
+    validate_aa(o2pt, ts, RT_TS);
+    process_annc_at_update(target_rtnode, ts);
 #endif
 
     update_resource(target_rtnode->obj, ts);
