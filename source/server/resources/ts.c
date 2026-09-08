@@ -95,6 +95,10 @@ int create_ts(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
     cJSON_DeleteItemFromObject(ts, "cbs");
     cJSON_DeleteItemFromObject(ts, "mdlt");
     cJSON_AddNumberToObject(ts, "mdc", 0);
+    // mdlt is a read-only, server-maintained attribute just like mdc. Initialise it
+    // to an empty list instead of leaving it absent until the first missing-data
+    // event, so a freshly created <timeSeries> already exposes it.
+    cJSON_AddItemToObject(ts, "mdlt", cJSON_CreateArray());
     cJSON_AddNumberToObject(ts, "cni", 0);
     cJSON_AddNumberToObject(ts, "cbs", 0);
 
@@ -254,8 +258,12 @@ int update_ts(oneM2MPrimitive *o2pt, RTNode *target_rtnode) {
         cJSON *mdc = cJSON_GetObjectItem(target_rtnode->obj, "mdc");
         if(mdc) cJSON_SetNumberValue(mdc, 0);
         else cJSON_AddNumberToObject(target_rtnode->obj, "mdc", 0);
+        // Clear mdlt to an empty list rather than removing the attribute. Removing it
+        // also meant db_update_resource() never emitted the column, leaving a stale
+        // mdlt in the DB that reappeared on the next restart with mdc already reset.
         cJSON *mdlt = cJSON_GetObjectItem(target_rtnode->obj, "mdlt");
-        if (mdlt) cJSON_DeleteItemFromObject(target_rtnode->obj, "mdlt");
+        if (mdlt) cJSON_ReplaceItemInObject(target_rtnode->obj, "mdlt", cJSON_CreateArray());
+        else cJSON_AddItemToObject(target_rtnode->obj, "mdlt", cJSON_CreateArray());
         char *now = get_local_time(0);
         cJSON_ReplaceItemInObject(target_rtnode->obj, "lt", cJSON_CreateString(now));
         free(now);
