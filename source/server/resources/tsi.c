@@ -44,12 +44,21 @@ long long parse_time_to_us_tsi(char *s) {
     return t_us;
 }
 
+// Exact inverse of parse_time_to_us_tsi(), which interprets the timestamp with
+// timegm(). Use gmtime_r() here so a value parsed and formatted back is unchanged
+// regardless of the server's local timezone.
 void us_to_iso8601_tsi(long long us, char *buf) {
     time_t sec = us / 1000000;
-    int micro = us % 1000000;
-    struct tm *t = localtime(&sec);
-    sprintf(buf, "%04d%02d%02dT%02d%02d%02d,%06d",
-            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec, micro);
+    int micro = (int)(us % 1000000);
+    struct tm t;
+    gmtime_r(&sec, &t);
+    if (micro) {
+        sprintf(buf, "%04d%02d%02dT%02d%02d%02d,%06d",
+                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec, micro);
+    } else {
+        sprintf(buf, "%04d%02d%02dT%02d%02d%02d",
+                t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+    }
 }
 
 
@@ -121,12 +130,16 @@ int create_tsi(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
         cJSON_Delete(tsi); cJSON_Delete(root); return handle_error(o2pt, RSC_CONFLICT, "dgt dup");
     }
 
+    // Missing-data detection compares this data point against the previous one, so
+    // capture the latest existing dataGenerationTime before this instance is stored.
+    char *prev_dgt = db_tsi_get_last_dgt(get_ri_rtnode(parent_rtnode));
+
     int cs = strlen(p_con->valuestring);
     cJSON_AddNumberToObject(tsi, "cs", cs);
 
     cJSON *p_obj = parent_rtnode->obj;
     int mbs = cJSON_GetObjectItem(p_obj, "mbs")->valueint;
-    if (cs > mbs) { cJSON_Delete(tsi); cJSON_Delete(root); return handle_error(o2pt, RSC_NOT_ACCEPTABLE, "mbs exceed"); }
+    if (cs > mbs) { free(prev_dgt); cJSON_Delete(tsi); cJSON_Delete(root); return handle_error(o2pt, RSC_NOT_ACCEPTABLE, "mbs exceed"); }
 
     int current_cni = 0;
     int current_cbs = 0;
@@ -147,12 +160,12 @@ int create_tsi(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
 
     if (p_snr) {
         if (!cJSON_IsNumber(p_snr)) {
-            cJSON_Delete(tsi); cJSON_Delete(root);
+            free(prev_dgt); cJSON_Delete(tsi); cJSON_Delete(root);
             return handle_error(o2pt, RSC_BAD_REQUEST, "snr invalid");
         }
         snr = (int)cJSON_GetNumberValue(p_snr);
         if (snr < 0) {
-            cJSON_Delete(tsi); cJSON_Delete(root);
+            free(prev_dgt); cJSON_Delete(tsi); cJSON_Delete(root);
             return handle_error(o2pt, RSC_BAD_REQUEST, "snr invalid");
         }
     } else {
@@ -176,7 +189,7 @@ int create_tsi(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
     sprintf(uri, "%s/%s", get_uri_rtnode(parent_rtnode), cJSON_GetObjectItem(tsi, "rn")->valuestring);
 
     if (db_store_resource(tsi, uri) != 1) {
-        free(uri); cJSON_Delete(tsi); cJSON_Delete(root);
+        free(prev_dgt); free(uri); cJSON_Delete(tsi); cJSON_Delete(root);
         return handle_error(o2pt, RSC_INTERNAL_SERVER_ERROR, "DB fail");
     }
 
@@ -195,54 +208,63 @@ int create_tsi(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
         int notify_mdc = 0;
 
         pthread_mutex_lock(&main_lock);
-        int current_mdc = db_ts_get_mdc(get_ri_rtnode(parent_rtnode));
-        cJSON_SetNumberValue(cJSON_GetObjectItem(p_obj, "mdc"), current_mdc);
 
         long long t_curr_dgt = parse_time_to_us_tsi(p_dgt->valuestring);
-        long long pei_us = (long long)pei->valueint * 1000;
+        long long t_prev_dgt = prev_dgt ? parse_time_to_us_tsi(prev_dgt) : 0;
+        long long pei_us  = (long long)pei->valueint * 1000;
         long long peid_us = (peid_obj) ? (long long)peid_obj->valueint * 1000 : 0;
-        bool is_missing = false;
-        int mdc_to_add = 0;
 
-        long long t_ct = parse_time_to_us_tsi(cJSON_GetObjectItem(p_obj, "ct")->valuestring);
-
-        int base_snr = db_tsi_get_min_snr(get_ri_rtnode(parent_rtnode));
-
-        long long expected = t_ct + (long long)(snr - base_snr) * pei_us;
-        long long lower = expected - peid_us;
-        long long upper = expected + peid_us;
-
-        if (t_curr_dgt < lower) {
-            if (snr != base_snr) {
-                long long early_gap = lower - t_curr_dgt;
-                mdc_to_add = (int)((early_gap + pei_us - 1) / pei_us);
-                if (mdc_to_add > 0) is_missing = true;
+        // A data point is expected every `pei` after the previous one, within `peid`
+        // tolerance. Anchor on the previous data point's dataGenerationTime: the AE
+        // owns that clock, so anchoring on a server-side timestamp (the <timeSeries>
+        // creation time) marked every instance as missing whenever the two clocks
+        // did not happen to coincide.
+        int missed = 0;
+        if (t_prev_dgt > 0 && t_curr_dgt > t_prev_dgt) {
+            long long delta = t_curr_dgt - t_prev_dgt;
+            if (delta > pei_us + peid_us) {
+                missed = (int)((delta + peid_us) / pei_us) - 1;
+                if (missed < 1) missed = 1;
             }
-        } else if (t_curr_dgt > upper) {
-            long long late_gap = t_curr_dgt - upper;
-            mdc_to_add = (int)((late_gap + pei_us - 1) / pei_us);
-            if (mdc_to_add > 0) is_missing = true;
         }
 
-        // IMPORTANT: Unit tests expect missing-data to be accumulated one-by-one.
-        // Do not jump missing counts by more than 1 in a single TSI creation.
-        if (mdc_to_add > 1) {
-            mdc_to_add = 1;
-        }
-
-        if (is_missing && mdc_to_add > 0) {
-            current_mdc += mdc_to_add;
-            char *now_str = get_local_time(0);
-            db_ts_set_mdc_and_append_mdlt(get_ri_rtnode(parent_rtnode), current_mdc, now_str);
-            cJSON_SetNumberValue(cJSON_GetObjectItem(p_obj, "mdc"), current_mdc);
+        if (missed > 0) {
             cJSON *mdlt = cJSON_GetObjectItem(p_obj, "mdlt");
-            if (!mdlt) mdlt = cJSON_AddArrayToObject(p_obj, "mdlt");
-            cJSON_AddItemToArray(mdlt, cJSON_CreateString(now_str));
-            free(now_str);
+            if (!mdlt) {
+                mdlt = cJSON_AddArrayToObject(p_obj, "mdlt");
+            } else if (!cJSON_IsArray(mdlt)) {
+                cJSON_ReplaceItemInObject(p_obj, "mdlt", cJSON_CreateArray());
+                mdlt = cJSON_GetObjectItem(p_obj, "mdlt");
+            }
 
-            // Defer notification until after releasing the lock (notify may do network I/O).
+            // Record the dataGenerationTime each missing data point would have had.
+            for (int k = 1; k <= missed; k++) {
+                char md_time[64];
+                us_to_iso8601_tsi(t_prev_dgt + (long long)k * pei_us, md_time);
+                cJSON_AddItemToArray(mdlt, cJSON_CreateString(md_time));
+                logger("TSI_TRACE", LOG_LEVEL_DEBUG,
+                       "Missing data point detected for TS [%s]: dgt=%s",
+                       get_ri_rtnode(parent_rtnode), md_time);
+            }
+
+            // mdlt holds at most mdn entries; the oldest are dropped to make room for
+            // new ones, and mdc always reports how many entries mdlt currently holds.
+            cJSON *mdn_obj = cJSON_GetObjectItem(p_obj, "mdn");
+            int mdn = (mdn_obj && cJSON_IsNumber(mdn_obj)) ? (int)cJSON_GetNumberValue(mdn_obj) : 0;
+            if (mdn > 0) {
+                while (cJSON_GetArraySize(mdlt) > mdn) {
+                    cJSON_DeleteItemFromArray(mdlt, 0);
+                }
+            }
+
+            int new_mdc = cJSON_GetArraySize(mdlt);
+            cJSON *mdc_obj = cJSON_GetObjectItem(p_obj, "mdc");
+            if (mdc_obj && cJSON_IsNumber(mdc_obj)) cJSON_SetNumberValue(mdc_obj, new_mdc);
+            else cJSON_ReplaceItemInObject(p_obj, "mdc", cJSON_CreateNumber(new_mdc));
+
+            // db_update_resource() below persists mdc and mdlt from p_obj.
             need_notify = true;
-            notify_mdc = current_mdc;
+            notify_mdc = new_mdc;
         }
         pthread_mutex_unlock(&main_lock);
 
@@ -250,6 +272,7 @@ int create_tsi(oneM2MPrimitive *o2pt, RTNode *parent_rtnode) {
             notify_missing_data(parent_rtnode, notify_mdc, MDC_SRC_TSI_GAP);
         }
     }
+    free(prev_dgt);
 
     char *new_lt_final = get_local_time(0);
     if (cJSON_GetObjectItem(p_obj, "lt")) {

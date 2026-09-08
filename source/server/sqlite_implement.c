@@ -2536,6 +2536,35 @@ int db_tsi_check_snr_dup(const char *ts_ri, int snr)
     return exists;
 }
 
+// dgt uses the fixed-width oneM2M timestamp format, so lexical ordering is
+// chronological ordering.
+char *db_tsi_get_last_dgt(const char *ts_ri)
+{
+    if (!ts_ri) return NULL;
+    sqlite3_mutex_enter(sqlite3_db_mutex(db));
+
+    const char *sql =
+        "SELECT tsi.dgt "
+        "FROM tsi JOIN general ON tsi.id = general.id "
+        "WHERE general.pi = ? AND tsi.dgt IS NOT NULL "
+        "ORDER BY tsi.dgt DESC LIMIT 1;";
+
+    sqlite3_stmt *stmt = NULL;
+    char *dgt = NULL;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, ts_ri, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const unsigned char *v = sqlite3_column_text(stmt, 0);
+            if (v && strlen((const char *)v) > 0) dgt = strdup((const char *)v);
+        }
+    }
+
+    if (stmt) sqlite3_finalize(stmt);
+    sqlite3_mutex_leave(sqlite3_db_mutex(db));
+    return dgt;
+}
+
 int db_ts_get_mdc(const char *ts_ri)
 {
     if (!ts_ri) return 0;
